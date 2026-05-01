@@ -78,7 +78,7 @@ Now we connect everything together. The Arduino will read coordinates from the G
 1. Assemble all connections on the breadboard or PCB prototype.
 2. Open `Full_Implementation/GSM+GPS+MQTT` and update the sketch with your specific APN and HiveMQ Broker details.
 3. Upload the sketch.
-4. **Expected Output**: The Arduino will print `"GPS Fix acquired..."` and successfully publish genuine coordinates to the HiveMQ topic `AgriShield/OnTime/G1/Location`. 
+4. **Expected Output**: The Arduino will print `"GPS Fix acquired..."` and successfully publish genuine coordinates to the HiveMQ topic. 
 
 ### Contributing
 Before pushing your IoT team codes to the G1 repo on top of these templates:
