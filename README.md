@@ -1,4 +1,4 @@
-# Agri Shield - OnTime G1 IoT Project
+# OnTime G1 IoT Project
 
 Welcome to the **OnTime G1** repository! This repository contains the firmwares and testing scripts for our IoT system utilizing an **Arduino Nano**, **NEO-6M GPS**, **SIM800L GSM module**, and **HiveMQ MQTT Broker**.
 
