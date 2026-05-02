@@ -1,0 +1,108 @@
+#define TINY_GSM_MODEM_SIM800
+#include <TinyGsmClient.h>
+#include <PubSubClient.h>
+#include <SoftwareSerial.h>
+
+// ── Config ─────────────────────────────────────────────────
+const char APN[]       = "internet";
+const char APN_USER[]  = "";
+const char APN_PASS[]  = "";
+
+const char BROKER[]    = "test.mosquitto.org";  // changed from hivemq
+const int  PORT        = 1883;
+const char TOPIC[]     = "slk2024/nano/sensor";
+const char CLIENT_ID[] = "Nano_SLK_48291";
+// ───────────────────────────────────────────────────────────
+
+SoftwareSerial gsmSerial(3, 2);
+TinyGsm        modem(gsmSerial);
+TinyGsmClient  gsmClient(modem);
+PubSubClient   mqtt(gsmClient);
+
+// ── Dummy sensor values ────────────────────────────────────
+float temperature = 25.0;
+int   humidity    = 65;
+int   pressure    = 1013;
+float voltage     = 3.70;
+
+void updateDummyValues() {
+  temperature += random(-10, 10) * 0.1;
+  humidity    += random(-2, 2);
+  pressure    += random(-3, 3);
+  voltage     += random(-5, 5) * 0.01;
+
+  temperature = constrain(temperature, 20.0, 35.0);
+  humidity    = constrain(humidity, 40, 90);
+  pressure    = constrain(pressure, 1000, 1025);
+  voltage     = constrain(voltage, 3.5, 4.2);
+}
+// ───────────────────────────────────────────────────────────
+
+void connectGSM() {
+  Serial.println("Initialising modem...");
+  modem.restart();
+  Serial.print("Modem: ");
+  Serial.println(modem.getModemInfo());
+
+  Serial.print("Waiting for network...");
+  while (!modem.waitForNetwork()) {
+    Serial.print(".");
+    delay(1000);
+  }
+  Serial.println(" OK");
+
+  Serial.print("Connecting to APN: ");
+  Serial.println(APN);
+  while (!modem.gprsConnect(APN, APN_USER, APN_PASS)) {
+    Serial.print(".");
+    delay(1000);
+  }
+  Serial.print("GPRS connected | IP: ");
+  Serial.println(modem.localIP());
+}
+
+void connectMQTT() {
+  mqtt.setServer(BROKER, PORT);
+  Serial.print("Connecting to MQTT broker...");
+  while (!mqtt.connect(CLIENT_ID)) {
+    Serial.print(".");
+    delay(2000);
+  }
+  Serial.println(" connected!");
+}
+
+void setup() {
+  Serial.begin(9600);
+  gsmSerial.begin(9600);
+  randomSeed(analogRead(0));
+
+  connectGSM();
+  connectMQTT();
+}
+
+void loop() {
+  if (!mqtt.connected()) connectMQTT();
+  mqtt.loop();
+
+  updateDummyValues();
+
+  char tempStr[8];
+  char voltStr[8];
+  dtostrf(temperature, 4, 1, tempStr);
+  dtostrf(voltage,     4, 2, voltStr);
+
+  char payload[96];
+  snprintf(payload, sizeof(payload),
+    "{\"temp\":%s,\"hum\":%d,\"pres\":%d,\"volt\":%s}",
+    tempStr, humidity, pressure, voltStr);
+
+  if (mqtt.publish(TOPIC, payload, true)) {
+    Serial.print("Published: ");
+    Serial.println(payload);
+  } else {
+    Serial.println("Publish failed — reconnecting...");
+    connectMQTT();
+  }
+
+  delay(5000);
+}
