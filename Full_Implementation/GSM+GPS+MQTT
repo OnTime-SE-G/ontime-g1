@@ -8,7 +8,7 @@
 const char APN[]       = "internet";
 const char APN_USER[]  = "";
 const char APN_PASS[]  = "";
-const char BROKER[]    = "test.mosquitto.org";
+const char BROKER[]    = "broker.hivemq.com";
 const int  PORT        = 1883;
 const char TOPIC[]     = "slk2024/nano/gps";
 const char CLIENT_ID[] = "Nano_SLK_48291";
