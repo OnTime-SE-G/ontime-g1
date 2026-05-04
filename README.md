@@ -6,6 +6,69 @@ To make it easier for our team and standard users to replicate and push the code
 
 ---
 
+## OnTime G2 MQTT Contract
+
+The reference sketches in this folder are aligned with the G2 ingestion plan.
+
+G1 publishes GPS location only. It does **not** publish `tripId`. G2 Ingestion
+resolves the active trip by checking `busId` against Fleet's Kafka
+`trip.lifecycle` cache.
+
+Location topic:
+
+```text
+transport/bus/{busId}/location
+```
+
+Location payload:
+
+```json
+{
+  "busId": "1",
+  "lat": 6.9271,
+  "lon": 79.8612,
+  "speed": 35.0,
+  "heading": 120.0,
+  "timestamp": "2026-05-02T10:15:30Z"
+}
+```
+
+Heartbeat topic:
+
+```text
+transport/bus/{busId}/heartbeat
+```
+
+Heartbeat payload:
+
+```json
+{
+  "busId": "1",
+  "deviceId": "GPS-1",
+  "timestamp": "2026-05-02T10:15:30Z",
+  "gpsFix": true,
+  "satellites": 8,
+  "signalQuality": 21,
+  "firmwareVersion": "g1-0.1.0"
+}
+```
+
+Important rules:
+
+- `timestamp` is mandatory and must come from GPS event time.
+- `busId` is the Fleet bus `id`, serialized as a string.
+- Live GPS publishes must use retained=false.
+- Heartbeat publishes may use retained=true because they represent latest device
+  status, not live movement.
+- Field names must be `busId`, `lat`, `lon`, `speed`, `heading`, and
+  `timestamp`.
+- `tripId` is intentionally not included in the GPS payload.
+- HiveMQ Cloud usually requires TLS on port 8883. The current SIM800L sketches
+  use non-TLS `TinyGsmClient`, so TLS support must be confirmed before using
+  HiveMQ Cloud directly.
+
+---
+
 ## 🛠️ Hardware Requirements
 - **Microcontroller**: Arduino Nano
 - **GPS Module**: NEO-6M (or similar GPS Neo module)
