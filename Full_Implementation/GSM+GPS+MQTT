@@ -4,60 +4,60 @@
 #include <SoftwareSerial.h>
 #include <TinyGPS++.h>
 
-// ── Config ─────────────────────────────────────────────────
-const char APN[]       = "internet";
-const char APN_USER[]  = "";
-const char APN_PASS[]  = "";
-const char BROKER[]    = "test.mosquitto.org";
-const int  PORT        = 1883;
-const char TOPIC[]     = "slk2024/nano/gps";
-const char CLIENT_ID[] = "Nano_SLK_48291";
-const char BUS_ID[]    = "ABC-1234";          // ← change to your bus ID
-// ───────────────────────────────────────────────────────────
+// OnTime G1 -> G2 contract:
+// - GPS device sends busId and event-time GPS only.
+// - GPS device does not send tripId.
+// - G2 Ingestion resolves the active trip using busId + Kafka trip.lifecycle.
+// - Live GPS messages must not be retained, otherwise old positions can replay.
+// - Heartbeat messages report device status and may be retained.
 
-SoftwareSerial gsmSerial(3, 2);   // GSM  RX=3, TX=2
-SoftwareSerial gpsSerial(5, 4);   // GPS  RX=5, TX=4
+// Network config
+const char APN[] = "internet";
+const char APN_USER[] = "";
+const char APN_PASS[] = "";
 
-TinyGsm        modem(gsmSerial);
-TinyGsmClient  gsmClient(modem);
-PubSubClient   mqtt(gsmClient);
-TinyGPSPlus    gps;
+// MQTT config
+// Local Mosquitto example:
+//   MQTT_BROKER = "test.mosquitto.org" or your local broker IP
+//   MQTT_PORT   = 1883
+// HiveMQ Cloud usually requires TLS on 8883. SIM800L TLS support must be
+// confirmed before using HiveMQ Cloud directly from this firmware.
+const char MQTT_BROKER[] = "test.mosquitto.org";
+const int MQTT_PORT = 1883;
+const char MQTT_USERNAME[] = "";
+const char MQTT_PASSWORD[] = "";
 
-// ── GPS data ───────────────────────────────────────────────
-double   lat       = 0.0;
-double   lng       = 0.0;
-float    speed_kmh = 0.0;
-float    heading   = 0.0;
-uint32_t timestamp = 0;
-bool     gpsFixed  = false;
+// Device identity config
+const char BUS_ID[] = "1";
+const char CLIENT_ID[] = "ontime-g1-bus-1";
+const char DEVICE_ID[] = "GPS-1";
+const char FIRMWARE_VERSION[] = "g1-0.1.0";
+const unsigned long LOCATION_INTERVAL_MS = 5000;
+const unsigned long HEARTBEAT_INTERVAL_MS = 30000;
 
-// ── Unix timestamp from GPS date+time ─────────────────────
-uint32_t getUnixTimestamp(int y, int mo, int d, int h, int mi, int s) {
-  // Days per month (non-leap year)
-  int daysInMonth[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+char locationTopic[96];
+char heartbeatTopic[96];
 
-  // Leap year correction for February
-  if ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0))
-    daysInMonth[1] = 29;
+SoftwareSerial gsmSerial(3, 2);  // GSM RX=3, TX=2
+SoftwareSerial gpsSerial(5, 4);  // GPS RX=5, TX=4
 
-  // Count days from 1970 to start of given year
-  uint32_t days = 0;
-  for (int i = 1970; i < y; i++) {
-    days += ((i % 4 == 0 && i % 100 != 0) || (i % 400 == 0)) ? 366 : 365;
-  }
+TinyGsm modem(gsmSerial);
+TinyGsmClient gsmClient(modem);
+PubSubClient mqtt(gsmClient);
+TinyGPSPlus gps;
 
-  // Add days for each month this year
-  for (int i = 0; i < mo - 1; i++) {
-    days += daysInMonth[i];
-  }
-
-  days += d - 1;
-
-  return days * 86400UL + h * 3600UL + mi * 60UL + s;
-}
+double lat = 0.0;
+double lon = 0.0;
+float speedKmph = 0.0;
+float headingDeg = 0.0;
+char timestampIso[25] = "";
+bool gpsFixed = false;
+bool timestampValid = false;
+unsigned long lastHeartbeatAt = 0;
 
 void readGPS() {
   gpsSerial.listen();
+
   unsigned long start = millis();
   while (millis() - start < 1000) {
     while (gpsSerial.available()) {
@@ -65,34 +65,39 @@ void readGPS() {
     }
   }
 
-  if (gps.location.isValid() && gps.location.age() < 2000) {
-    lat       = gps.location.lat();
-    lng       = gps.location.lng();
-    speed_kmh = gps.speed.kmph();
-    heading   = gps.course.deg();
-    gpsFixed  = true;
+  gpsFixed = false;
+  timestampValid = false;
+  timestampIso[0] = '\0';
 
-    // Get Unix timestamp from GPS date and time
-    if (gps.date.isValid() && gps.time.isValid()) {
-      timestamp = getUnixTimestamp(
-        gps.date.year(),
-        gps.date.month(),
-        gps.date.day(),
-        gps.time.hour(),
-        gps.time.minute(),
-        gps.time.second()
-      );
-    }
-  } else {
-    gpsFixed = false;
+  if (gps.location.isValid() && gps.location.age() < 2000) {
+    lat = gps.location.lat();
+    lon = gps.location.lng();
+    speedKmph = gps.speed.isValid() ? gps.speed.kmph() : 0.0;
+    headingDeg = gps.course.isValid() ? gps.course.deg() : 0.0;
+    gpsFixed = true;
+  }
+
+  if (gps.date.isValid() && gps.time.isValid()) {
+    snprintf(
+      timestampIso,
+      sizeof(timestampIso),
+      "%04d-%02d-%02dT%02d:%02d:%02dZ",
+      gps.date.year(),
+      gps.date.month(),
+      gps.date.day(),
+      gps.time.hour(),
+      gps.time.minute(),
+      gps.time.second()
+    );
+    timestampValid = true;
   }
 }
-// ───────────────────────────────────────────────────────────
 
 void connectGSM() {
   gsmSerial.listen();
   Serial.println("Initialising modem...");
   modem.restart();
+
   Serial.print("Modem: ");
   Serial.println(modem.getModemInfo());
 
@@ -109,19 +114,78 @@ void connectGSM() {
     Serial.print(".");
     delay(1000);
   }
+
   Serial.print("GPRS connected | IP: ");
   Serial.println(modem.localIP());
 }
 
+bool mqttConnectOnce() {
+  if (strlen(MQTT_USERNAME) > 0) {
+    return mqtt.connect(CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD);
+  }
+
+  return mqtt.connect(CLIENT_ID);
+}
+
 void connectMQTT() {
   gsmSerial.listen();
-  mqtt.setServer(BROKER, PORT);
+  mqtt.setServer(MQTT_BROKER, MQTT_PORT);
+
   Serial.print("Connecting to MQTT broker...");
-  while (!mqtt.connect(CLIENT_ID)) {
+  while (!mqttConnectOnce()) {
     Serial.print(".");
     delay(2000);
   }
+
   Serial.println(" connected!");
+}
+
+void publishHeartbeatIfDue() {
+  unsigned long now = millis();
+  if (lastHeartbeatAt != 0 && now - lastHeartbeatAt < HEARTBEAT_INTERVAL_MS) {
+    return;
+  }
+
+  if (!timestampValid) {
+    Serial.println("Heartbeat skipped: waiting for valid GPS date/time...");
+    return;
+  }
+
+  int signalQuality = modem.getSignalQuality();
+  if (signalQuality < 0) {
+    signalQuality = 0;
+  }
+
+  char heartbeatPayload[256];
+  snprintf(
+    heartbeatPayload,
+    sizeof(heartbeatPayload),
+    "{"
+      "\"busId\":\"%s\","
+      "\"deviceId\":\"%s\","
+      "\"timestamp\":\"%s\","
+      "\"gpsFix\":%s,"
+      "\"satellites\":%lu,"
+      "\"signalQuality\":%d,"
+      "\"firmwareVersion\":\"%s\""
+    "}",
+    BUS_ID,
+    DEVICE_ID,
+    timestampIso,
+    gpsFixed ? "true" : "false",
+    gps.satellites.value(),
+    signalQuality,
+    FIRMWARE_VERSION
+  );
+
+  if (mqtt.publish(heartbeatTopic, heartbeatPayload, true)) {
+    lastHeartbeatAt = now;
+    Serial.print("Heartbeat: ");
+    Serial.println(heartbeatPayload);
+  } else {
+    Serial.println("Heartbeat publish failed. Reconnecting...");
+    connectMQTT();
+  }
 }
 
 void setup() {
@@ -129,56 +193,84 @@ void setup() {
   gsmSerial.begin(9600);
   gpsSerial.begin(9600);
 
+  snprintf(
+    locationTopic,
+    sizeof(locationTopic),
+    "transport/bus/%s/location",
+    BUS_ID
+  );
+  snprintf(
+    heartbeatTopic,
+    sizeof(heartbeatTopic),
+    "transport/bus/%s/heartbeat",
+    BUS_ID
+  );
+
+  Serial.print("OnTime GPS topic: ");
+  Serial.println(locationTopic);
+  Serial.print("OnTime heartbeat topic: ");
+  Serial.println(heartbeatTopic);
+
   connectGSM();
   connectMQTT();
 }
 
 void loop() {
-  // 1. Read GPS
   readGPS();
 
-  // 2. Ensure MQTT connected
   gsmSerial.listen();
-  if (!mqtt.connected()) connectMQTT();
+  if (!mqtt.connected()) {
+    connectMQTT();
+  }
   mqtt.loop();
+  publishHeartbeatIfDue();
 
-  // 3. Only publish if GPS has a valid fix
   if (!gpsFixed) {
     Serial.print("Waiting for GPS fix... satellites: ");
     Serial.println(gps.satellites.value());
-    delay(5000);
+    delay(LOCATION_INTERVAL_MS);
     return;
   }
 
-  // 4. AVR-safe float conversions
-  char latStr[14], lngStr[14], spdStr[8], hdgStr[8];
-  dtostrf(lat,       9, 6, latStr);
-  dtostrf(lng,       9, 6, lngStr);
-  dtostrf(speed_kmh, 5, 1, spdStr);
-  dtostrf(heading,   5, 1, hdgStr);
+  if (!timestampValid) {
+    Serial.println("Waiting for valid GPS date/time...");
+    delay(LOCATION_INTERVAL_MS);
+    return;
+  }
 
-  // 5. Build JSON matching exact schema
-  char payload[192];
-  snprintf(payload, sizeof(payload),
+  char latStr[14], lonStr[14], speedStr[8], headingStr[8];
+  dtostrf(lat, 9, 6, latStr);
+  dtostrf(lon, 9, 6, lonStr);
+  dtostrf(speedKmph, 5, 1, speedStr);
+  dtostrf(headingDeg, 5, 1, headingStr);
+
+  char payload[224];
+  snprintf(
+    payload,
+    sizeof(payload),
     "{"
-      "\"bus_id\":\"%s\","
+      "\"busId\":\"%s\","
       "\"lat\":%s,"
-      "\"lng\":%s,"
-      "\"speed_kmh\":%s,"
+      "\"lon\":%s,"
+      "\"speed\":%s,"
       "\"heading\":%s,"
-      "\"timestamp\":%lu"
+      "\"timestamp\":\"%s\""
     "}",
-    BUS_ID, latStr, lngStr, spdStr, hdgStr, timestamp
+    BUS_ID,
+    latStr,
+    lonStr,
+    speedStr,
+    headingStr,
+    timestampIso
   );
 
-  // 6. Publish
-  if (mqtt.publish(TOPIC, payload, true)) {
+  if (mqtt.publish(locationTopic, payload, false)) {
     Serial.print("Published: ");
     Serial.println(payload);
   } else {
-    Serial.println("Publish failed — reconnecting...");
+    Serial.println("Publish failed. Reconnecting...");
     connectMQTT();
   }
 
-  delay(5000);
+  delay(LOCATION_INTERVAL_MS);
 }
