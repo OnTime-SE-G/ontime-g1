@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bus Tracker</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow:wght@300;400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #0b0e14;
+    --panel:     #111520;
+    --border:    #1e2535;
+    --accent:    #00e5ff;
+    --accent2:   #00ff99;
+    --warn:      #ff4c4c;
+    --muted:     #4a5568;
+    --text:      #c9d1e0;
+    --mono:      'Share Tech Mono', monospace;
+    --sans:      'Barlow', sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    height: 100vh;
+    display: grid;
+    grid-template-rows: 48px 1fr;
+    grid-template-columns: 1fr 320px;
+    overflow: hidden;
+  }
+
+  /* ── HEADER ── */
+  header {
+    grid-column: 1 / -1;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    gap: 16px;
+  }
+
+  header h1 {
+    font-family: var(--mono);
+    font-size: 13px;
+    letter-spacing: 3px;
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+
+  .header-sep { flex: 1; }
+
+  .conn-badge {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 1px;
+    color: var(--muted);
+  }
+
+  .conn-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--warn);
+    transition: background 0.4s;
+    box-shadow: 0 0 0 0 var(--warn);
+  }
+
+  .conn-dot.connected {
+    background: var(--accent2);
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(0,255,153,0.5); }
+    70%  { box-shadow: 0 0 0 8px rgba(0,255,153,0); }
+    100% { box-shadow: 0 0 0 0 rgba(0,255,153,0); }
+  }
+
+  /* ── MAP ── */
+  #map {
+    position: relative;
+    grid-row: 2;
+    grid-column: 1;
+    width: 100%;
+    height: 100%;
+    background: #090c12;
+  }
+
+  #no-fix-overlay {
+    display: none;
+    position: absolute;
+    inset: 0;
+    background: rgba(9,12,20,0.82);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 12px;
+    backdrop-filter: blur(2px);
+  }
+
+  #no-fix-overlay.visible { display: flex; }
+
+  #no-fix-overlay .icon {
+    font-size: 36px;
+    opacity: 0.5;
+  }
+
+  #no-fix-overlay p {
+    font-family: var(--mono);
+    font-size: 13px;
+    letter-spacing: 2px;
+    color: var(--warn);
+    text-transform: uppercase;
+  }
+
+  #no-fix-overlay small {
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 1px;
+  }
+
+  /* ── SIDE PANEL ── */
+  #panel {
+    grid-row: 2;
+    grid-column: 2;
+    background: var(--panel);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .section-label {
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 3px;
+    color: var(--muted);
+    text-transform: uppercase;
+    padding: 16px 20px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .stat-row {
+    display: flex;
+    flex-direction: column;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    gap: 4px;
+    transition: background 0.2s;
+  }
+
+  .stat-row:hover { background: rgba(255,255,255,0.02); }
+
+  .stat-label {
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 2px;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+
+  .stat-value {
+    font-family: var(--mono);
+    font-size: 22px;
+    color: var(--accent);
+    line-height: 1.1;
+    transition: color 0.3s;
+  }
+
+  .stat-value.empty { color: var(--muted); font-size: 16px; }
+
+  .stat-unit {
+    font-size: 11px;
+    color: var(--muted);
+    margin-left: 4px;
+  }
+
+  /* Speed bar */
+  .speed-bar-wrap {
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    margin-top: 6px;
+    overflow: hidden;
+  }
+
+  .speed-bar {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--accent2), var(--accent));
+    border-radius: 2px;
+    transition: width 0.6s ease;
+  }
+
+  /* Heading compass */
+  .compass-wrap {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 6px;
+  }
+
+  .compass {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    position: relative;
+    flex-shrink: 0;
+  }
+
+  .compass-arrow {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 2px;
+    height: 14px;
+    background: linear-gradient(to bottom, var(--accent), transparent);
+    transform-origin: bottom center;
+    transform: translateX(-50%) translateY(-100%) rotate(0deg);
+    transition: transform 0.6s ease;
+    border-radius: 1px;
+  }
+
+  .compass-dot {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 4px;
+    height: 4px;
+    background: var(--accent);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+  }
+
+  /* Fix status */
+  .fix-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    margin-top: 6px;
+    width: fit-content;
+  }
+
+  .fix-badge.fixed {
+    border-color: rgba(0,255,153,0.3);
+    color: var(--accent2);
+    background: rgba(0,255,153,0.05);
+  }
+
+  .fix-badge.no-fix {
+    border-color: rgba(255,76,76,0.3);
+    color: var(--warn);
+    background: rgba(255,76,76,0.05);
+  }
+
+  .fix-badge-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  /* Coords row */
+  .coords-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .coord-cell {
+    background: var(--panel);
+    padding: 10px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .coord-label {
+    font-family: var(--mono);
+    font-size: 8px;
+    letter-spacing: 2px;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+
+  .coord-value {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+  }
+
+  /* Raw message */
+  .raw-section {
+    flex: 1;
+    padding: 14px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .raw-label {
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 2px;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+
+  .raw-box {
+    background: #090c12;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 10px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    white-space: pre-wrap;
+    word-break: break-all;
+    line-height: 1.6;
+    min-height: 80px;
+  }
+
+  .raw-box.has-data { color: rgba(0,229,255,0.6); }
+
+  /* Scan line effect on map */
+  #map::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.04) 2px,
+      rgba(0,0,0,0.04) 4px
+    );
+    pointer-events: none;
+    z-index: 500;
+  }
+
+  /* Flash animation on update */
+  @keyframes flash {
+    0%   { background: rgba(0,229,255,0.08); }
+    100% { background: transparent; }
+  }
+
+  .flash { animation: flash 0.5s ease-out; }
+
+  /* Leaflet dark tile filter */
+  .leaflet-tile { filter: brightness(0.7) saturate(0.4) hue-rotate(180deg); }
+  .leaflet-container { background: #090c12; }
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<header>
+  <h1>⬡ Bus Tracker</h1>
+  <div class="header-sep"></div>
+  <div class="conn-badge">
+    <div class="conn-dot" id="conn-dot"></div>
+    <span id="conn-label">CONNECTING...</span>
+  </div>
+</header>
+
+<!-- MAP -->
+<div id="map">
+  <div id="no-fix-overlay" class="visible">
+    <div class="icon">📡</div>
+    <p>No GPS Fix</p>
+    <small>Waiting for location data...</small>
+  </div>
+</div>
+
+<!-- SIDE PANEL -->
+<div id="panel">
+
+  <div class="section-label">Vehicle</div>
+
+  <div class="stat-row" id="row-busid">
+    <div class="stat-label">Bus ID</div>
+    <div class="stat-value empty" id="val-busid">—</div>
+  </div>
+
+  <div class="section-label">Motion</div>
+
+  <div class="stat-row" id="row-speed">
+    <div class="stat-label">Speed</div>
+    <div class="stat-value empty" id="val-speed">—<span class="stat-unit">km/h</span></div>
+    <div class="speed-bar-wrap"><div class="speed-bar" id="speed-bar"></div></div>
+  </div>
+
+  <div class="stat-row" id="row-heading">
+    <div class="stat-label">Heading</div>
+    <div class="stat-value empty" id="val-heading">—<span class="stat-unit">°</span></div>
+    <div class="compass-wrap">
+      <div class="compass">
+        <div class="compass-arrow" id="compass-arrow"></div>
+        <div class="compass-dot"></div>
+      </div>
+      <span style="font-family:var(--mono);font-size:10px;color:var(--muted)" id="heading-dir">—</span>
+    </div>
+  </div>
+
+  <div class="section-label">Position</div>
+
+  <div class="stat-row" id="row-fix">
+    <div class="stat-label">GPS Fix</div>
+    <div class="fix-badge no-fix" id="fix-badge">
+      <div class="fix-badge-dot"></div>
+      <span id="fix-label">No fix</span>
+    </div>
+  </div>
+
+  <div class="coords-row">
+    <div class="coord-cell">
+      <div class="coord-label">Latitude</div>
+      <div class="coord-value" id="val-lat">—</div>
+    </div>
+    <div class="coord-cell">
+      <div class="coord-label">Longitude</div>
+      <div class="coord-value" id="val-lng">—</div>
+    </div>
+  </div>
+
+  <div class="section-label">Time</div>
+
+  <div class="stat-row" id="row-time">
+    <div class="stat-label">Last Update</div>
+    <div class="stat-value empty" style="font-size:14px" id="val-time">waiting...</div>
+  </div>
+
+  <div class="raw-section">
+    <div class="raw-label">Last Raw Payload</div>
+    <div class="raw-box" id="raw-box">Waiting for message...</div>
+  </div>
+
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<script>
+
+  // ── MAP SETUP ──
+  const map = L.map('map', { zoomControl: true }).setView([7.8731, 80.7718], 8);
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap',
+    maxZoom: 19
+  }).addTo(map);
+
+  // Custom rotatable bus marker
+  function makeIcon(heading) {
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+        <circle cx="16" cy="16" r="10" fill="#0b0e14" stroke="#00e5ff" stroke-width="1.5" opacity="0.9"/>
+        <polygon points="16,5 19,20 16,17 13,20" fill="#00e5ff"
+          transform="rotate(${heading}, 16, 16)"/>
+        <circle cx="16" cy="16" r="2.5" fill="#00ff99"/>
+      </svg>`;
+    return L.divIcon({
+      html: svg,
+      className: '',
+      iconSize: [32, 32],
+      iconAnchor: [16, 16]
+    });
+  }
+
+  let marker = null;
+  let mapCentered = false;
+
+  function updateMap(lat, lng, heading) {
+    if (!marker) {
+      marker = L.marker([lat, lng], { icon: makeIcon(heading) }).addTo(map);
+    } else {
+      marker.setLatLng([lat, lng]);
+      marker.setIcon(makeIcon(heading));
+    }
+    if (!mapCentered) {
+      map.setView([lat, lng], 15);
+      mapCentered = true;
+    }
+  }
+
+  // ── HEADING HELPERS ──
+  function headingToDir(deg) {
+    const dirs = ['N','NE','E','SE','S','SW','W','NW'];
+    return dirs[Math.round(deg / 45) % 8];
+  }
+
+  // ── FLASH HELPER ──
+  function flash(el) {
+    el.classList.remove('flash');
+    void el.offsetWidth;
+    el.classList.add('flash');
+  }
+
+  // ── UPDATE UI ──
+  function updatePanel(data) {
+    const hasFix = !(data.lat === 0.0 && data.lng === 0.0);
+
+    // Bus ID
+    const busEl = document.getElementById('val-busid');
+    busEl.textContent = data.bus_id || '—';
+    busEl.classList.toggle('empty', !data.bus_id);
+    flash(document.getElementById('row-busid'));
+
+    // Speed
+    const spd = parseFloat(data.speed_kmh) || 0;
+    const spdEl = document.getElementById('val-speed');
+    spdEl.innerHTML = `${spd.toFixed(1)}<span class="stat-unit">km/h</span>`;
+    spdEl.classList.remove('empty');
+    document.getElementById('speed-bar').style.width = Math.min(spd / 120 * 100, 100) + '%';
+    flash(document.getElementById('row-speed'));
+
+    // Heading
+    const hdg = parseFloat(data.heading) || 0;
+    const hdgEl = document.getElementById('val-heading');
+    hdgEl.innerHTML = `${hdg.toFixed(1)}<span class="stat-unit">°</span>`;
+    hdgEl.classList.remove('empty');
+    document.getElementById('compass-arrow').style.transform =
+      `translateX(-50%) translateY(-100%) rotate(${hdg}deg)`;
+    document.getElementById('heading-dir').textContent = headingToDir(hdg);
+    flash(document.getElementById('row-heading'));
+
+    // GPS Fix
+    const fixBadge = document.getElementById('fix-badge');
+    const fixLabel = document.getElementById('fix-label');
+    if (hasFix) {
+      fixBadge.className = 'fix-badge fixed';
+      fixLabel.textContent = 'Fixed';
+    } else {
+      fixBadge.className = 'fix-badge no-fix';
+      fixLabel.textContent = 'No fix';
+    }
+
+    // Coordinates
+    document.getElementById('val-lat').textContent = hasFix ? data.lat.toFixed(6) : '—';
+    document.getElementById('val-lng').textContent = hasFix ? data.lng.toFixed(6) : '—';
+
+    // Timestamp
+    const timeEl = document.getElementById('val-time');
+    if (data.timestamp) {
+      const d = new Date(data.timestamp * 1000);
+      timeEl.textContent = d.toLocaleTimeString() + ' ' + d.toLocaleDateString();
+      timeEl.classList.remove('empty');
+    }
+    flash(document.getElementById('row-time'));
+
+    // No-fix overlay
+    const overlay = document.getElementById('no-fix-overlay');
+    if (hasFix) {
+      overlay.classList.remove('visible');
+      updateMap(data.lat, data.lng, hdg);
+    } else {
+      overlay.classList.add('visible');
+    }
+
+    // Raw payload
+    const rawBox = document.getElementById('raw-box');
+    rawBox.textContent = JSON.stringify(data, null, 2);
+    rawBox.classList.add('has-data');
+  }
+
+  // ── MQTT CONNECTION ──
+  const BROKER = 'wss://broker.hivemq.com:8884/mqtt';
+  const TOPIC  = 'OnTime-SE-G/bus1/tracker';
+
+  const dot   = document.getElementById('conn-dot');
+  const label = document.getElementById('conn-label');
+
+  const client = mqtt.connect(BROKER, {
+    clientId: 'bus_tracker_' + Math.random().toString(16).slice(2, 8),
+    reconnectPeriod: 3000,
+    connectTimeout: 10000,
+    clean: true
+  });
+
+  client.on('connect', () => {
+    dot.classList.add('connected');
+    label.textContent = 'CONNECTED';
+    client.subscribe(TOPIC, (err) => {
+      if (err) console.error('Subscribe error:', err);
+    });
+  });
+
+  client.on('reconnect', () => {
+    dot.classList.remove('connected');
+    label.textContent = 'RECONNECTING...';
+  });
+
+  client.on('offline', () => {
+    dot.classList.remove('connected');
+    label.textContent = 'OFFLINE';
+  });
+
+  client.on('error', (err) => {
+    dot.classList.remove('connected');
+    label.textContent = 'ERROR';
+    console.error('MQTT error:', err);
+  });
+
+  client.on('message', (topic, message) => {
+    try {
+      const data = JSON.parse(message.toString());
+      updatePanel(data);
+    } catch (e) {
+      console.error('Failed to parse message:', e);
+    }
+  });
+
+</script>
+</body>
+</html>
