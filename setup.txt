@@ -1,0 +1,316 @@
+/*
+  ==========================================
+  OnTime ESP32 Bus Tracker
+  GPS + WiFi + MQTT – MINIMIZED PAYLOADS
+  ==========================================
+*/
+
+#define MQTT_MAX_PACKET_SIZE 1024
+
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+#include <TinyGPS++.h>
+
+// ==========================================
+// WIFI CONFIG
+// ==========================================
+const char WIFI_SSID[]     = "HN Networking";
+const char WIFI_PASSWORD[] = "Heshan2003";
+
+// ==========================================
+// MQTT CONFIG
+// ==========================================
+const char MQTT_BROKER[]    = "94f82b369e4a40e3a5f0725c0850c6f4.s1.eu.hivemq.cloud";
+const int  MQTT_PORT        = 8883;
+const char MQTT_USERNAME[]  = "chamodh";
+const char MQTT_PASSWORD[]  = "Noobmaster69";
+
+// ==========================================
+// DEVICE CONFIG
+// ==========================================
+const char BUS_ID[]           = "23";
+const char CLIENT_ID[]        = "ontime-g1-bus-1";
+const char FIRMWARE_VERSION[] = "g1-esp32-1.1.0";
+
+const unsigned long LOCATION_INTERVAL_MS  = 5000;
+const unsigned long HEARTBEAT_INTERVAL_MS = 30000;
+
+// ==========================================
+// ERROR HANDLING CONFIG
+// ==========================================
+const unsigned long WIFI_CONNECT_TIMEOUT_MS = 20000;
+const unsigned long GPS_DATA_TIMEOUT_MS     = 10000;
+const int           MAX_WIFI_RETRIES        = 5;
+const int           MAX_MQTT_RETRIES        = 5;
+const unsigned long REBOOT_AFTER_OFFLINE_MS = 300000;
+
+// ==========================================
+// MQTT TOPICS
+// ==========================================
+const char LOCATION_TOPIC[]  = "transport/bus/23/location";
+const char HEARTBEAT_TOPIC[] = "transport/bus/23/heartbeat";
+
+// ==========================================
+// GPS SERIAL
+// ==========================================
+HardwareSerial gpsSerial(2);   // RX=16, TX=17
+TinyGPSPlus gps;
+
+// ==========================================
+// WIFI + MQTT
+// ==========================================
+WiFiClientSecure wifiClient;
+PubSubClient mqtt(wifiClient);
+
+// ==========================================
+// GLOBALS
+// ==========================================
+double lat = 0.0, lon = 0.0;
+float speedKmph = 0.0, headingDeg = 0.0;
+char timestampIso[32] = "";
+bool gpsFixed = false, timestampValid = false;
+unsigned long lastHeartbeatAt = 0, lastGpsByteAt = 0, lastSuccessfulPublishAt = 0;
+
+// ==========================================
+// HELPERS
+// ==========================================
+const char* mqttStateToString(int state) {
+  switch (state) {
+    case -4: return "CONNECTION_TIMEOUT";
+    case -3: return "CONNECTION_LOST";
+    case -2: return "CONNECT_FAILED";
+    case -1: return "DISCONNECTED";
+    case  0: return "CONNECTED";
+    case  1: return "BAD_PROTOCOL";
+    case  2: return "BAD_CLIENT_ID";
+    case  3: return "UNAVAILABLE";
+    case  4: return "BAD_CREDENTIALS";
+    case  5: return "UNAUTHORIZED";
+    default: return "UNKNOWN";
+  }
+}
+
+void safeReboot(const char* reason) {
+  Serial.print("[FATAL] Rebooting: ");
+  Serial.println(reason);
+  Serial.flush();
+  delay(1000);
+  ESP.restart();
+}
+
+// ==========================================
+// READ GPS
+// ==========================================
+void readGPS() {
+  bool gotByte = false;
+  while (gpsSerial.available()) {
+    gps.encode(gpsSerial.read());
+    gotByte = true;
+  }
+  if (gotByte) lastGpsByteAt = millis();
+
+  if (lastGpsByteAt != 0 && millis() - lastGpsByteAt > GPS_DATA_TIMEOUT_MS) {
+    Serial.println("[WARN] No GPS data for 10s. Check wiring (RX=16, TX=17).");
+    lastGpsByteAt = millis();
+  }
+
+  gpsFixed = false;
+  timestampValid = false;
+  timestampIso[0] = '\0';
+
+  if (gps.location.isValid() && gps.location.age() < 2000) {
+    double newLat = gps.location.lat();
+    double newLon = gps.location.lng();
+    if (newLat < -90.0 || newLat > 90.0 || newLon < -180.0 || newLon > 180.0) {
+      Serial.println("[WARN] Invalid GPS coordinates, skipping");
+    } else {
+      lat        = newLat;
+      lon        = newLon;
+      speedKmph  = gps.speed.isValid()  ? gps.speed.kmph()  : 0.0;
+      headingDeg = gps.course.isValid() ? gps.course.deg()  : 0.0;
+      gpsFixed   = true;
+    }
+  }
+
+  if (gps.date.isValid() && gps.time.isValid() && gps.date.year() >= 2024) {
+    snprintf(timestampIso, sizeof(timestampIso),
+             "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+             gps.date.year(), gps.date.month(), gps.date.day(),
+             gps.time.hour(), gps.time.minute(), gps.time.second(),
+             gps.time.centisecond() * 10);
+    timestampValid = true;
+  }
+}
+
+// ==========================================
+// WIFI
+// ==========================================
+bool connectWiFi() {
+  Serial.print("Connecting WiFi to "); Serial.print(WIFI_SSID); Serial.print(" ");
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    if (millis() - start > WIFI_CONNECT_TIMEOUT_MS) {
+      Serial.println("\n[ERROR] WiFi timeout. Status: " + String(WiFi.status()));
+      return false;
+    }
+    Serial.print(".");
+    delay(500);
+  }
+  Serial.println(" connected! IP: " + WiFi.localIP().toString() + " RSSI: " + String(WiFi.RSSI()));
+  return true;
+}
+
+bool ensureWiFi() {
+  if (WiFi.status() == WL_CONNECTED) return true;
+  Serial.println("[WARN] WiFi disconnected, reconnecting...");
+  for (int i = 1; i <= MAX_WIFI_RETRIES; i++) {
+    Serial.printf("WiFi attempt %d/%d\n", i, MAX_WIFI_RETRIES);
+    if (connectWiFi()) return true;
+    delay(2000);
+  }
+  Serial.println("[ERROR] WiFi connect failed after retries");
+  return false;
+}
+
+// ==========================================
+// MQTT
+// ==========================================
+bool mqttConnectOnce() {
+  if (strlen(MQTT_USERNAME) > 0)
+    return mqtt.connect(CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD);
+  return mqtt.connect(CLIENT_ID);
+}
+
+bool connectMQTT() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[ERROR] Cannot connect MQTT: WiFi down");
+    return false;
+  }
+  wifiClient.setInsecure();
+  mqtt.setServer(MQTT_BROKER, MQTT_PORT);
+  Serial.printf("Connecting MQTT to %s:%d\n", MQTT_BROKER, MQTT_PORT);
+  for (int i = 1; i <= MAX_MQTT_RETRIES; i++) {
+    Serial.printf("MQTT attempt %d/%d ... ", i, MAX_MQTT_RETRIES);
+    if (mqttConnectOnce()) {
+      Serial.println("connected!");
+      return true;
+    }
+    Serial.printf("failed, state=%d (%s)\n", mqtt.state(), mqttStateToString(mqtt.state()));
+    delay(2000);
+  }
+  Serial.println("[ERROR] MQTT connect failed after retries");
+  return false;
+}
+
+// ==========================================
+// HEARTBEAT
+// ==========================================
+void publishHeartbeatIfDue() {
+  unsigned long now = millis();
+  if (lastHeartbeatAt != 0 && now - lastHeartbeatAt < HEARTBEAT_INTERVAL_MS) return;
+  if (!timestampValid) { Serial.println("Heartbeat skipped: waiting GPS time..."); return; }
+  if (!mqtt.connected()) { Serial.println("Heartbeat skipped: MQTT not connected"); return; }
+
+  char payload[128];
+  int written = snprintf(payload, sizeof(payload),
+    "{\"busId\":\"%s\",\"timestamp\":\"%s\"}",
+    BUS_ID, timestampIso
+  );
+  if (written < 0 || written >= (int)sizeof(payload)) {
+    Serial.println("[ERROR] Heartbeat payload truncated, skipping");
+    return;
+  }
+
+  if (mqtt.publish(HEARTBEAT_TOPIC, payload, true)) {
+    lastHeartbeatAt = now;
+    lastSuccessfulPublishAt = now;
+    Serial.print("Heartbeat: "); Serial.println(payload);
+  } else {
+    Serial.printf("[ERROR] Heartbeat publish failed, state=%s\n", mqttStateToString(mqtt.state()));
+    lastHeartbeatAt = now;
+  }
+}
+
+// ==========================================
+// SETUP
+// ==========================================
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+  Serial.println("\n==========================================");
+  Serial.printf("OnTime Bus Tracker %s\nBus ID: %s\n", FIRMWARE_VERSION, BUS_ID);
+  Serial.println("==========================================");
+  gpsSerial.begin(9600, SERIAL_8N1, 16, 17);
+
+  if (!connectWiFi()) Serial.println("[WARN] Initial WiFi failed, will retry");
+  if (WiFi.status() == WL_CONNECTED && !connectMQTT()) Serial.println("[WARN] Initial MQTT failed, will retry");
+  lastSuccessfulPublishAt = millis();
+}
+
+// ==========================================
+// LOOP
+// ==========================================
+void loop() {
+  // 1. WiFi
+  if (!ensureWiFi()) {
+    delay(5000);
+    if (millis() - lastSuccessfulPublishAt > REBOOT_AFTER_OFFLINE_MS) safeReboot("Offline too long (WiFi)");
+    return;
+  }
+  // 2. MQTT
+  if (!mqtt.connected()) {
+    if (!connectMQTT()) {
+      delay(5000);
+      if (millis() - lastSuccessfulPublishAt > REBOOT_AFTER_OFFLINE_MS) safeReboot("Offline too long (MQTT)");
+      return;
+    }
+  }
+  mqtt.loop();
+
+  // 3. GPS
+  readGPS();
+
+  // 4. Heartbeat
+  publishHeartbeatIfDue();
+
+  // 5. Location – wait for fix
+  if (!gpsFixed) {
+    Serial.printf("Waiting GPS fix | Satellites: %d\n", gps.satellites.value());
+    delay(LOCATION_INTERVAL_MS);
+    return;
+  }
+  if (!timestampValid) {
+    Serial.println("Waiting GPS time...");
+    delay(LOCATION_INTERVAL_MS);
+    return;
+  }
+
+  char payload[256];
+  int written = snprintf(payload, sizeof(payload),
+    "{\"busId\":\"%s\",\"lat\":%.5f,\"lon\":%.5f,\"speed\":%d,\"heading\":%d,\"timestamp\":\"%s\"}",
+    BUS_ID, lat, lon,
+    (int)roundf(speedKmph),
+    (int)roundf(headingDeg),
+    timestampIso
+  );
+  if (written < 0 || written >= (int)sizeof(payload)) {
+    Serial.println("[ERROR] Location payload truncated, skipping");
+    delay(LOCATION_INTERVAL_MS);
+    return;
+  }
+
+  if (mqtt.publish(LOCATION_TOPIC, payload, false)) {
+    lastSuccessfulPublishAt = millis();
+    Serial.print("Published: "); Serial.println(payload);
+  } else {
+    Serial.printf("[ERROR] Publish failed, state=%d (%s). Reconnecting...\n",
+                  mqtt.state(), mqttStateToString(mqtt.state()));
+    mqtt.disconnect();
+  }
+  delay(LOCATION_INTERVAL_MS);
+}
