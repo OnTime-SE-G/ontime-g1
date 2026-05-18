@@ -13,6 +13,35 @@
 #include <TinyGPS++.h>
 
 // ==========================================
+// KALMAN FILTER
+// ==========================================
+struct KalmanFilter {
+  double q;        // process noise  (how much we trust GPS)
+  double r;        // measurement noise (how noisy GPS is)
+  double x;        // filtered value
+  double p;        // estimation error
+  double k;        // kalman gain
+  bool   initialised;
+};
+
+KalmanFilter kfLat = {0.0001, 0.01, 0.0, 1.0, 0.0, false};
+KalmanFilter kfLon = {0.0001, 0.01, 0.0, 1.0, 0.0, false};
+
+double kalmanUpdate(KalmanFilter &kf, double measurement) {
+  if (!kf.initialised) {
+    kf.x = measurement;   // first reading: trust it fully
+    kf.initialised = true;
+    return kf.x;
+  }
+  kf.p = kf.p + kf.q;                      // prediction step
+  kf.k = kf.p / (kf.p + kf.r);             // calculate gain
+  kf.x = kf.x + kf.k * (measurement - kf.x); // correct estimate
+  kf.p = (1 - kf.k) * kf.p;               // update error
+  return kf.x;
+}
+
+
+// ==========================================
 // WIFI CONFIG
 // ==========================================
 const char WIFI_SSID[]     = "HN Networking";
@@ -72,6 +101,12 @@ char timestampIso[32] = "";
 bool gpsFixed = false, timestampValid = false;
 unsigned long lastHeartbeatAt = 0, lastGpsByteAt = 0, lastSuccessfulPublishAt = 0;
 
+
+ if (!gps.location.isValid()) {
+    kfLat.initialised = false;   // reset filter on signal loss
+    kfLon.initialised = false;
+  }
+
 // ==========================================
 // HELPERS
 // ==========================================
@@ -125,8 +160,8 @@ void readGPS() {
     if (newLat < -90.0 || newLat > 90.0 || newLon < -180.0 || newLon > 180.0) {
       Serial.println("[WARN] Invalid GPS coordinates, skipping");
     } else {
-      lat        = newLat;
-      lon        = newLon;
+      lat        = kalmanUpdate(kfLat, newLat);   // was: lat = newLat
+      lon        = kalmanUpdate(kfLon, newLon);   // was: lon = newLon
       speedKmph  = gps.speed.isValid()  ? gps.speed.kmph()  : 0.0;
       headingDeg = gps.course.isValid() ? gps.course.deg()  : 0.0;
       gpsFixed   = true;
