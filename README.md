@@ -119,52 +119,219 @@ Dense city, noisy GPS	0.001	0.05	More responsive
 Where the Filter Is Added in the Code
 1. After your #include block — add the struct and function:
 
-// ==========================================
-// KALMAN FILTER
-// ==========================================
-struct KalmanFilter {
-  double q;           // process noise
-  double r;           // measurement noise
-  double x;           // current filtered value
-  double p;           // estimation error
-  double k;           // kalman gain
-  bool   initialised;
-};
+# Kalman Filter — GPS Smoothing
 
+## The Problem with Raw GPS
+
+A GPS module does not produce perfectly stable coordinates. Even when the bus
+is completely stationary, satellite signals bounce off buildings, refract
+through clouds, and introduce tiny positional errors every second. On a live
+map, this makes the bus icon jitter and drift by 5–15 metres continuously —
+even when parked.
+
+Without filtering, the published coordinates look like this:
+
+```
+Reading 1:  lat=6.927081,  lon=79.861243
+Reading 2:  lat=6.927094,  lon=79.861229   ← jumped ~1.5m north-west
+Reading 3:  lat=6.927079,  lon=79.861251   ← jumped ~2m south-east
+Reading 4:  lat=6.927088,  lon=79.861238   ← jumped again
+```
+
+The bus has not moved. The GPS has.
+
+---
+
+## What a Kalman Filter Does
+
+A Kalman filter is a **recursive estimation algorithm** that blends two
+sources of information on every update cycle:
+
+- **What we predicted** — where the bus should be, based on its last known position
+- **What the sensor says** — the raw GPS coordinate just received
+
+Rather than blindly trusting the GPS, the filter asks: *"How noisy is this
+sensor, and how confident am I in my last estimate?"* It then computes a
+weighted average — leaning toward the GPS reading when confidence is low, and
+leaning toward the prior estimate when the GPS is known to be noisy.
+
+The result is a smooth, stable coordinate stream that follows real movement
+accurately while suppressing random jitter.
+
+---
+
+## Why Two Separate Filters?
+
+```cpp
 KalmanFilter kfLat = {0.0001, 0.01, 0.0, 1.0, 0.0, false};
 KalmanFilter kfLon = {0.0001, 0.01, 0.0, 1.0, 0.0, false};
+```
 
+Latitude and longitude are **completely independent axes**. A bus travelling
+due east changes only its longitude — latitude stays constant. Applying a
+single 2D filter would couple the axes and introduce cross-axis error.
+Two independent 1D filters — one for each coordinate — is the correct
+approach and keeps the implementation simple and auditable.
+
+---
+
+## The Four-Step Algorithm
+
+Every time `readGPS()` produces a new valid coordinate, `kalmanUpdate()` runs
+these four steps in sequence:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  STEP 1 — Prediction                                        │
+│                                                             │
+│  p = p + q                                                  │
+│                                                             │
+│  Confidence in our estimate degrades slightly each cycle    │
+│  because the bus has physically moved since last reading.   │
+│  q (process noise) controls how fast confidence decays.     │
+└─────────────────────────────────────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────────────────────┐
+│  STEP 2 — Kalman Gain                                       │
+│                                                             │
+│  k = p / (p + r)                                            │
+│                                                             │
+│  k is a value between 0 and 1. It answers the question:    │
+│  "How much should I trust this new GPS reading?"            │
+│                                                             │
+│  k → 1   trust the new GPS reading heavily                  │
+│  k → 0   trust the prior estimate, ignore GPS noise         │
+└─────────────────────────────────────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────────────────────┐
+│  STEP 3 — Correction                                        │
+│                                                             │
+│  x = x + k × (measurement − x)                             │
+│                                                             │
+│  The filtered output moves toward the new GPS reading       │
+│  by a fraction k. If k=0.9, we move 90% of the way.        │
+│  If k=0.1, we barely move — the estimate stays stable.      │
+└─────────────────────────────────────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────────────────────┐
+│  STEP 4 — Update Error Covariance                           │
+│                                                             │
+│  p = (1 − k) × p                                           │
+│                                                             │
+│  Confidence in the estimate improves now that a new         │
+│  measurement has been incorporated. Ready for next cycle.   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+In code, this is the complete implementation:
+
+```cpp
 double kalmanUpdate(KalmanFilter &kf, double measurement) {
+
+  // Cold start — no prior estimate exists, trust the first reading fully
   if (!kf.initialised) {
     kf.x = measurement;
     kf.initialised = true;
     return kf.x;
   }
-  kf.p = kf.p + kf.q;
-  kf.k = kf.p / (kf.p + kf.r);
-  kf.x = kf.x + kf.k * (measurement - kf.x);
-  kf.p = (1 - kf.k) * kf.p;
+
+  kf.p = kf.p + kf.q;                          // Step 1: Prediction
+  kf.k = kf.p / (kf.p + kf.r);                 // Step 2: Kalman Gain
+  kf.x = kf.x + kf.k * (measurement - kf.x);  // Step 3: Correction
+  kf.p = (1 - kf.k) * kf.p;                    // Step 4: Update error
+
   return kf.x;
 }
-2. Inside readGPS() — change 2 lines where raw lat/lon are stored:
+```
 
-// BEFORE:
+Twenty lines. No external library. No floating-point instability. Runs in
+microseconds on the ESP32.
+
+---
+
+## Where It Sits in the Code
+
+The filter is called inside `readGPS()`, immediately after coordinate
+validation and before the values are stored into the global `lat` and `lon`
+variables:
+
+```cpp
+// readGPS() — inside the valid-location block
+// BEFORE (raw GPS, causes map jitter):
 lat = newLat;
 lon = newLon;
 
-// AFTER:
+// AFTER (Kalman filtered, smooth output):
 lat = kalmanUpdate(kfLat, newLat);
 lon = kalmanUpdate(kfLon, newLon);
-3. Inside readGPS() — reset filter if GPS signal is lost:
+```
 
+Only these two lines change. The rest of `readGPS()`, the heartbeat logic,
+the MQTT publish, and all error handling are untouched.
+
+---
+
+## Signal Loss and Filter Reset
+
+If the GPS loses satellite lock — inside a tunnel, underground car park, or
+dense urban canyon — the filter is reset immediately:
+
+```cpp
 if (!gps.location.isValid()) {
   kfLat.initialised = false;
   kfLon.initialised = false;
 }
-The reset prevents the filter from slowly drifting back to an old position after a tunnel or signal gap.
+```
 
-Why Two Separate Filters?
-Latitude and longitude are completely independent axes. A bus moving east changes longitude only. A separate filter for each axis means neither one influences the other — they are treated as separate 1D problems, which is the correct way to apply a Kalman filter to 2D GPS coordinates.
+**Why this matters:** Without the reset, the filter would hold its last
+estimate and slowly try to blend back toward the real position when signal
+recovers. This creates a visible "drift" effect on the map — the bus appears
+to teleport gradually rather than snapping to the correct location. Resetting
+`initialised = false` means the first valid reading after signal recovery is
+trusted completely, giving an instant accurate position update.
+
+---
+
+## Tuning the Filter
+
+The filter behaviour is controlled by two constants in the `KalmanFilter` struct:
+
+```cpp
+KalmanFilter kfLat = {0.0001, 0.01, 0.0, 1.0, 0.0, false};
+//                     q       r
+```
+
+| Parameter | Name | Effect |
+|---|---|---|
+| `q` | Process noise | How fast the filter forgets the old estimate. **Lower** = smoother path, slower to respond to sharp turns. |
+| `r` | Measurement noise | How noisy the GPS sensor is assumed to be. **Higher** = trust the GPS less, smoother output but more lag. |
+
+### Recommended values by deployment environment
+
+| Environment | `q` | `r` | Character |
+|---|---|---|---|
+| Open highway, clear sky | `0.00001` | `0.005` | Very smooth, minimal lag |
+| Normal urban streets | `0.0001` | `0.01` | Balanced — default setting |
+| Dense city / signal bounce | `0.001` | `0.05` | More responsive, slightly noisier |
+
+To change the behaviour, edit only the first two values in the struct
+initialisation. No other code needs to change.
+
+---
+
+## Before and After
+
+| | Without Kalman Filter | With Kalman Filter |
+|---|---|---|
+| Stationary bus | Coordinates jump 5–15m randomly | Coordinates hold stable |
+| Moving bus | Path looks jagged on map | Path follows road smoothly |
+| After tunnel exit | Immediate correct position | Immediate correct position (filter reset) |
+| Sharp turn | Coordinates jitter through the turn | Smooth arc following road geometry |
+| Code complexity | — | +20 lines, zero new libraries |
+
 
 
 
